@@ -1,6 +1,7 @@
-import { characters, createOrEditCharacter, eventSource, event_types } from '../../../../script.js';
+import { characters, createOrEditCharacter, eventSource, event_types, getThumbnailUrl } from '../../../../script.js';
 import { extension_settings, writeExtensionField, UNSET_VALUE } from '../../../../scripts/extensions.js';
 import { Popup, POPUP_TYPE } from '../../../../scripts/popup.js';
+import { getBase64Async } from '../../../../scripts/utils.js';
 
 const EXTENSION_KEY = 'avatar_display_crop';
 const BUTTON_ID = 'avatar_display_crop_button';
@@ -13,13 +14,13 @@ function getCharacterCrop(character) {
 }
 
 function getCurrentCharacter() {
-    const characterId = $('#avatar_display_crop_button').data('character-id');
-    return Number.isInteger(characterId) ? characters[characterId] : null;
+    const characterId = Number(document.getElementById(BUTTON_ID)?.dataset.characterId);
+    return Number.isInteger(characterId) && characterId >= 0 ? characters[characterId] : null;
 }
 
 function getAvatarSource(character) {
     if (!character?.avatar || character.avatar === 'none') return '';
-    return `/thumbnail?type=avatar&file=${encodeURIComponent(character.avatar)}`;
+    return getThumbnailUrl('avatar', character.avatar);
 }
 
 function applyPreviewCrop(image, crop) {
@@ -111,13 +112,15 @@ function createButton() {
     const button = document.createElement('button');
     button.id = BUTTON_ID;
     button.type = 'button';
-    button.className = 'menu_button';
-    button.textContent = '裁剪显示';
+    button.className = 'menu_button fa-solid fa-scissors';
+    button.setAttribute('aria-label', '裁剪显示');
     button.title = '只裁剪头像显示区域，不修改导出图片';
     button.addEventListener('click', cropCurrentAvatar);
 
-    const avatarContainer = document.querySelector('#avatar_div');
-    avatarContainer?.append(button);
+    const deleteButton = document.querySelector('#delete_button');
+    if (deleteButton?.parentElement) {
+        deleteButton.parentElement.insertBefore(button, deleteButton.nextSibling);
+    }
 }
 
 function updateButtonState() {
@@ -148,31 +151,27 @@ function interceptNativeUpload() {
 
         event.stopImmediatePropagation();
         const file = input.files[0];
-        const source = URL.createObjectURL(file);
-        try {
-            const crop = await openCropDialog(source);
-            if (crop) {
-                currentCrop = crop;
-                currentAvatar = getCurrentCharacter()?.avatar ?? currentAvatar;
-                const preview = document.querySelector('#avatar_load_preview');
-                if (preview instanceof HTMLImageElement) {
-                    preview.src = source;
-                    applyPreviewCrop(preview, crop);
-                    preview.classList.add('avatar-display-crop-active');
-                }
-
-                // Save the original File through SillyTavern's normal character flow.
-                await createOrEditCharacter(event);
-
-                const avatar = String($('#avatar_url_pole').val() || currentAvatar || '');
-                const character = characters.find(item => item.avatar === avatar);
-                if (character) {
-                    currentAvatar = character.avatar;
-                    await saveCrop(character, crop);
-                }
+        const source = await getBase64Async(file);
+        const crop = await openCropDialog(source);
+        if (crop) {
+            currentCrop = crop;
+            currentAvatar = getCurrentCharacter()?.avatar ?? currentAvatar;
+            const preview = document.querySelector('#avatar_load_preview');
+            if (preview instanceof HTMLImageElement) {
+                preview.src = source;
+                applyPreviewCrop(preview, crop);
+                preview.classList.add('avatar-display-crop-active');
             }
-        } finally {
-            URL.revokeObjectURL(source);
+
+            // Save the original File through SillyTavern's normal character flow.
+            await createOrEditCharacter(event);
+
+            const avatar = String($('#avatar_url_pole').val() || currentAvatar || '');
+            const character = characters.find(item => item.avatar === avatar);
+            if (character) {
+                currentAvatar = character.avatar;
+                await saveCrop(character, crop);
+            }
         }
     }, true);
 }

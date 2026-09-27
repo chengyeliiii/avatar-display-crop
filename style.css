@@ -1,7 +1,8 @@
 #avatar_display_crop_button {
-    margin-top: 0.5em;
+    flex: 0 0 auto;
 }
 
 #avatar_load_preview.avatar-display-crop-active {
     object-fit: cover;
+    object-position: center;
 }
