@@ -20,24 +20,41 @@ function getCurrentCharacter() {
 
 function getAvatarSource(character) {
     if (!character?.avatar || character.avatar === 'none') return '';
-    return getThumbnailUrl('avatar', character.avatar);
+    return `/characters/${encodeURIComponent(character.avatar)}`;
 }
 
 function applyPreviewCrop(image, crop) {
     if (!image || !crop) {
         image?.style.removeProperty('object-position');
-        image?.style.removeProperty('transform');
+        image?.style.removeProperty('object-fit');
         return;
     }
 
     const sourceWidth = Number(crop.sourceWidth) || Number(crop.width);
     const sourceHeight = Number(crop.sourceHeight) || Number(crop.height);
-    const centerX = Number(crop.x) + Number(crop.width) / 2;
-    const centerY = Number(crop.y) + Number(crop.height) / 2;
+    const cropWidth = Number(crop.width);
+    const cropHeight = Number(crop.height);
 
-    if (!sourceWidth || !sourceHeight) return;
+    if (!sourceWidth || !sourceHeight || !cropWidth || !cropHeight) return;
 
-    image.style.objectPosition = `${(centerX / sourceWidth) * 100}% ${(centerY / sourceHeight) * 100}%`;
+    // object-position is based on the overflow created by object-fit: cover.
+    // Calculate that overflow from the actual preview box, then center the
+    // selected crop inside the visible area. This keeps right-side crops stable.
+    const boxRatio = image.clientWidth && image.clientHeight
+        ? image.clientWidth / image.clientHeight
+        : 2 / 3;
+    const coverWidth = Math.max(sourceWidth, sourceHeight * boxRatio);
+    const coverHeight = Math.max(sourceHeight, sourceWidth / boxRatio);
+    const xRange = Math.max(0, coverWidth - sourceWidth);
+    const yRange = Math.max(0, coverHeight - sourceHeight);
+    const centerX = Number(crop.x) + cropWidth / 2;
+    const centerY = Number(crop.y) + cropHeight / 2;
+    const viewportWidth = sourceWidth - xRange;
+    const viewportHeight = sourceHeight - yRange;
+    const x = xRange ? Math.max(0, Math.min(100, ((centerX - viewportWidth / 2) / xRange) * 100)) : 50;
+    const y = yRange ? Math.max(0, Math.min(100, ((centerY - viewportHeight / 2) / yRange) * 100)) : 50;
+    image.style.objectFit = 'cover';
+    image.style.objectPosition = `${x}% ${y}%`;
 }
 
 function updateEditorPreview(character = getCurrentCharacter()) {
@@ -53,7 +70,7 @@ function applyAllAvatarPreviews() {
     for (const image of document.querySelectorAll('img')) {
         if (!(image instanceof HTMLImageElement)) continue;
         const source = image.currentSrc || image.src;
-        if (!source.includes('type=avatar') && !source.includes('/characters/')) continue;
+        if (!source.includes('thumbnail') && !source.includes('/characters/')) continue;
 
         const character = characters.find(item => item.avatar && source.includes(encodeURIComponent(item.avatar)));
         if (!character) continue;
@@ -67,6 +84,7 @@ function applyAllAvatarPreviews() {
 async function openCropDialog(source) {
     const dialog = new Popup('Set the display crop of the avatar image', POPUP_TYPE.CROP, '', {
         cropImage: source,
+        cropAspect: Number.NaN,
     });
     const result = await dialog.show();
     if (!result || !dialog.cropData) return null;
