@@ -1,4 +1,4 @@
-import { characters, createOrEditCharacter, eventSource, event_types, getThumbnailUrl } from '../../../../script.js';
+import { characters, createOrEditCharacter, eventSource, event_types } from '../../../../script.js';
 import { extension_settings, UNSET_VALUE, writeExtensionField } from '../../../../scripts/extensions.js';
 import { Popup, POPUP_TYPE } from '../../../../scripts/popup.js';
 import { getBase64Async } from '../../../../scripts/utils.js';
@@ -29,30 +29,34 @@ function getEditorCharacter() {
 
 function getAvatarUrl(character) {
     return character?.avatar && character.avatar !== 'none'
-        ? getThumbnailUrl('avatar', character.avatar)
+        ? `/characters/${encodeURIComponent(character.avatar)}`
         : '';
 }
 
 function getImageCharacter(image) {
-    const source = image.currentSrc || image.src;
-    return characters.find(character => {
-        if (!character?.avatar || character.avatar === 'none') return false;
-        const avatar = encodeURIComponent(character.avatar);
-        return source.includes(avatar) || source.includes(character.avatar);
-    }) ?? null;
+    if (image.matches(EDITOR_PREVIEW_SELECTOR)) return getEditorCharacter();
+    const previous = renderedImages.get(image);
+    const source = previous && image.src === previous.preview ? previous.source : image.src;
+    const url = new URL(source, location.href);
+    const avatar = url.pathname === '/thumbnail' && url.searchParams.get('type') === 'avatar'
+        ? url.searchParams.get('file')
+        : url.pathname.startsWith('/characters/') ? decodeURIComponent(url.pathname.slice(12)) : null;
+    return getCharacterByAvatar(avatar);
 }
 
+const renderedImages = new WeakMap();
+const previews = new Map();
+
 function clearCropStyles(image) {
+    const previous = renderedImages.get(image);
+    if (previous && image.src === previous.preview) image.src = previous.source;
+    renderedImages.delete(image);
     image.style.removeProperty('object-fit');
     image.style.removeProperty('object-position');
     image.classList.remove('avatar-display-crop-active');
 }
 
-/**
- * Apply a crop using the actual source viewport exposed by object-fit: cover.
- * object-position percentages are relative to the overflow, not the source image.
- */
-function applyCrop(image, crop) {
+async function applyCrop(image, crop, source = image.src) {
     if (!crop) {
         clearCropStyles(image);
         return;
@@ -70,32 +74,58 @@ function applyCrop(image, crop) {
         return;
     }
 
-    const boxWidth = image.clientWidth;
-    const boxHeight = image.clientHeight;
-    if (!boxWidth || !boxHeight || !sourceWidth || !sourceHeight || !cropWidth || !cropHeight) return;
-
-    const boxRatio = boxWidth / boxHeight;
-    const sourceRatio = sourceWidth / sourceHeight;
-    const viewportWidth = sourceRatio > boxRatio ? sourceHeight * boxRatio : sourceWidth;
-    const viewportHeight = sourceRatio > boxRatio ? sourceHeight : sourceWidth / boxRatio;
-    const maxX = Math.max(0, sourceWidth - viewportWidth);
-    const maxY = Math.max(0, sourceHeight - viewportHeight);
-    const centerX = cropX + cropWidth / 2;
-    const centerY = cropY + cropHeight / 2;
-    const positionX = maxX ? ((centerX - viewportWidth / 2) / maxX) * 100 : 50;
-    const positionY = maxY ? ((centerY - viewportHeight / 2) / maxY) * 100 : 50;
-
-    image.style.objectFit = 'cover';
-    image.style.objectPosition = `${Math.max(0, Math.min(100, positionX))}% ${Math.max(0, Math.min(100, positionY))}%`;
-    image.classList.add('avatar-display-crop-active');
+    if (sourceWidth <= 0 || sourceHeight <= 0 || cropWidth <= 0 || cropHeight <= 0) return;
+    const key = JSON.stringify([source, crop]);
+    const previous = renderedImages.get(image);
+    if (previous?.key === key && image.src === previous.preview) return;
+    if (previous?.key === key && previous.preview === null) return;
+    const startingSource = image.src;
+    const record = { key, source: previous && image.src === previous.preview ? previous.source : image.src, preview: null };
+    renderedImages.set(image, record);
+    if (!previews.has(key)) {
+        const promise = (async () => {
+            const original = new Image();
+            original.src = source;
+            await original.decode();
+            // Old saved coordinates may be relative to a thumbnail. Normalize them.
+            const x = Math.max(0, cropX / sourceWidth) * original.naturalWidth;
+            const y = Math.max(0, cropY / sourceHeight) * original.naturalHeight;
+            const width = Math.min(cropWidth / sourceWidth * original.naturalWidth, original.naturalWidth - x);
+            const height = Math.min(cropHeight / sourceHeight * original.naturalHeight, original.naturalHeight - y);
+            if (width <= 0 || height <= 0) throw new Error('Invalid crop bounds');
+            const canvas = document.createElement('canvas');
+            const scale = Math.min(1, 1024 / Math.max(width, height));
+            canvas.width = Math.max(1, Math.round(width * scale));
+            canvas.height = Math.max(1, Math.round(height * scale));
+            canvas.getContext('2d').drawImage(original, x, y, width, height, 0, 0, canvas.width, canvas.height);
+            return canvas.toDataURL('image/png');
+        })();
+        if (previews.size >= 64) previews.delete(previews.keys().next().value);
+        previews.set(key, promise);
+    }
+    try {
+        const preview = await previews.get(key);
+        if (renderedImages.get(image) !== record || image.src !== startingSource) return;
+        record.preview = preview;
+        image.src = preview;
+        image.style.objectFit = 'contain';
+        image.style.objectPosition = 'center';
+        image.classList.add('avatar-display-crop-active');
+    } catch (error) {
+        previews.delete(key);
+        if (renderedImages.get(image) === record) renderedImages.delete(image);
+        console.error('[Avatar Display Crop] Preview failed', error);
+    }
 }
 
 function renderAvatars() {
     state.renderQueued = false;
-    for (const image of document.querySelectorAll('img')) {
+    for (const image of document.querySelectorAll('.avatar img, #avatar_load_preview')) {
         if (!(image instanceof HTMLImageElement)) continue;
+        if (image.closest('.cropper-container, .popup-crop-wrap, .zoomed_avatar')) continue;
         const character = getImageCharacter(image);
-        if (character) applyCrop(image, getCrop(character));
+        if (character) void applyCrop(image, getCrop(character), getAvatarUrl(character));
+        else if (renderedImages.has(image)) clearCropStyles(image);
     }
 }
 
@@ -136,6 +166,7 @@ async function saveCrop(character, crop) {
         EXTENSION_KEY,
         crop ? { crop } : UNSET_VALUE,
     );
+    previews.clear();
     queueRender();
 }
 
@@ -161,7 +192,8 @@ function ensureButton() {
     const deleteButton = document.querySelector('#delete_button');
     if (!deleteButton?.parentElement) return;
 
-    const button = document.createElement('div');
+    const button = document.createElement('button');
+    button.type = 'button';
     button.id = BUTTON_ID;
     button.className = 'menu_button fa-solid fa-scissors';
     button.title = '只裁剪头像显示区域，不修改导出图片';
@@ -222,7 +254,7 @@ function observeUi() {
         updateButton();
         queueRender();
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+    observer.observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] });
 }
 
 export async function init() {
