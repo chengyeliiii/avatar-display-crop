@@ -138,7 +138,7 @@ function queueRender() {
 async function readCrop(source) {
     const dialog = new Popup('Set the display crop of the avatar image', POPUP_TYPE.CROP, '', {
         cropImage: source,
-        cropAspect: Number.NaN,
+        cropAspect: 1,
     });
     const result = await dialog.show();
     if (!result || !dialog.cropData) return null;
