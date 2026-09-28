@@ -1,4 +1,4 @@
-import { characters, createOrEditCharacter, eventSource, event_types } from '../../../../script.js';
+import { characters, createOrEditCharacter, eventSource, event_types, getRequestHeaders } from '../../../../script.js';
 import { extension_settings, UNSET_VALUE, writeExtensionField } from '../../../../scripts/extensions.js';
 import { Popup, POPUP_TYPE } from '../../../../scripts/popup.js';
 import { getBase64Async } from '../../../../scripts/utils.js';
@@ -10,7 +10,7 @@ const EDITOR_PREVIEW_SELECTOR = '#avatar_load_preview';
 
 const state = {
     editorAvatar: null,
-    pendingCrop: null,
+    uploading: false,
     renderQueued: false,
 };
 
@@ -29,7 +29,7 @@ function getEditorCharacter() {
 
 function getAvatarUrl(character) {
     return character?.avatar && character.avatar !== 'none'
-        ? `/characters/${encodeURIComponent(character.avatar)}`
+        ? `/characters/${encodeURIComponent(character.avatar)}${imageVersions.has(character.avatar) ? `?adc=${imageVersions.get(character.avatar)}` : ''}`
         : '';
 }
 
@@ -46,6 +46,7 @@ function getImageCharacter(image) {
 
 const renderedImages = new WeakMap();
 const previews = new Map();
+const imageVersions = new Map();
 
 function clearCropStyles(image) {
     const previous = renderedImages.get(image);
@@ -120,6 +121,7 @@ async function applyCrop(image, crop, source = image.src) {
 
 function renderAvatars() {
     state.renderQueued = false;
+    if (state.uploading) return;
     for (const image of document.querySelectorAll('.avatar img, #avatar_load_preview')) {
         if (!(image instanceof HTMLImageElement)) continue;
         if (image.closest('.cropper-container, .popup-crop-wrap, .zoomed_avatar')) continue;
@@ -171,6 +173,7 @@ async function saveCrop(character, crop) {
 }
 
 async function cropExistingAvatar() {
+    if (state.uploading) return;
     const character = getEditorCharacter();
     const source = getAvatarUrl(character);
     if (!character || !source) return;
@@ -207,30 +210,63 @@ async function handleAvatarUpload(event) {
     if (!(input instanceof HTMLInputElement) || !input.files?.[0]) return;
 
     event.stopImmediatePropagation();
-    const source = await getBase64Async(input.files[0]);
-    const crop = await readCrop(source);
-    if (!crop) {
+    if (state.uploading) {
         input.value = '';
         return;
     }
-
-    state.pendingCrop = crop;
-    const preview = document.querySelector(EDITOR_PREVIEW_SELECTOR);
-    if (preview instanceof HTMLImageElement) {
-        preview.src = source;
-        applyCrop(preview, crop);
+    const file = input.files[0];
+    const isCreate = document.querySelector('#form_create')?.getAttribute('actiontype') === 'createcharacter';
+    const targetAvatar = isCreate ? null : String($('#avatar_url_pole').val() || state.editorAvatar || '');
+    state.uploading = true;
+    // Invalidate pending asynchronous renders before opening any dialogs.
+    for (const image of document.querySelectorAll('.avatar img, #avatar_load_preview')) {
+        clearCropStyles(image);
     }
+    try {
+        const choice = await new Popup('上传新头像后是否裁剪显示？原图将完整保留。', POPUP_TYPE.CONFIRM, '', {
+            okButton: '裁剪',
+            cancelButton: '取消上传',
+            customButtons: [{ text: '不裁剪', result: 2 }],
+        }).show();
+        if (choice !== 1 && choice !== 2) return;
+        const source = await getBase64Async(file);
+        const crop = choice === 1 ? await readCrop(source) : null;
+        if (choice === 1 && !crop) return;
 
-    // The original File remains in the input and is sent unchanged.
-    await createOrEditCharacter(event);
-
-    const avatar = String($('#avatar_url_pole').val() || state.editorAvatar || '');
-    const character = getCharacterByAvatar(avatar);
-    if (character) {
-        state.editorAvatar = character.avatar;
-        await saveCrop(character, state.pendingCrop);
+        let character;
+        if (targetAvatar) {
+            // Upload only the original image, never crop parameters or a preview.
+            const body = new FormData();
+            body.set('avatar', file);
+            body.set('avatar_url', targetAvatar);
+            const response = await fetch('/api/characters/edit-avatar', {
+                method: 'POST', headers: getRequestHeaders({ omitContentType: true }), body,
+            });
+            if (!response.ok) throw new Error(`Avatar upload failed (${response.status})`);
+            character = getCharacterByAvatar(targetAvatar);
+        } else {
+            await createOrEditCharacter(event);
+            character = getCharacterByAvatar(String($('#avatar_url_pole').val() || ''));
+            if (!character) throw new Error('Create the character before uploading its avatar.');
+        }
+        if (!character) throw new Error('Character no longer exists');
+        imageVersions.set(character.avatar, Date.now());
+        previews.clear();
+        // Refresh every visible reference, including the editor's previous data URL.
+        for (const image of document.querySelectorAll('.avatar img, #avatar_load_preview')) {
+            if (getImageCharacter(image)?.avatar !== character.avatar) continue;
+            clearCropStyles(image);
+            image.src = getAvatarUrl(character);
+        }
+        await saveCrop(character, crop);
+    } catch (error) {
+        console.error('[Avatar Display Crop] Upload failed', error);
+        toastr.error(String(error.message), '头像上传失败');
+    } finally {
+        input.value = '';
+        state.uploading = false;
+        queueRender();
     }
-    state.pendingCrop = null;
 }
 
 function bindUploadInput() {
